@@ -178,7 +178,6 @@ connect a Screen t3, Keyboard, and Neutronium Energy Cell.
   on the front face of the Rack.
 - You have to use a Rack, you can't use a normal Computer.
 - On the rack itself, set it up like in the screenshot. Make sure to connect the cable to the side of the rack that you indicate in the GUI.
-  ON.
 
 ![OC setup](images/17-oc-setup.png)
 ![Rack setup](images/18-rack-setup.png)
