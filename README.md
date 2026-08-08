@@ -177,7 +177,7 @@ connect a Screen t3, Keyboard, and Neutronium Energy Cell.
 - You can access the contents of a server/disk drive by right clicking it
   on the front face of the Rack.
 - You have to use a Rack, you can't use a normal Computer.
-- On the rack itself, set it up like in the screenshot, with Relay mode
+- On the rack itself, set it up like in the screenshot. Make sure to connect the cable to the side of the rack that you indicate in the GUI.
   ON.
 
 ![OC setup](images/17-oc-setup.png)
