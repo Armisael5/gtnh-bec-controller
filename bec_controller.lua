@@ -1,6 +1,6 @@
 -- BEC Controller
 -- Author: Armisael/nex5
--- Version: 2
+-- Version: 3
 -- Automates the Bose-Einstein Condensate network: pulls a recipe from
 -- Input Subnet, splits it among the IONodes, tracks nanite tiers as
 -- they change, ships output back to the main network, resets for the
@@ -390,8 +390,9 @@ local function scanRecipePatterns()
     local proxy = component.proxy(address)
     for slot = 1, 36 do
       local ok, pattern = pcall(proxy.getInterfacePattern, slot)
-      if not ok or pattern == nil then break end
-      if pattern.inputs then table.insert(patterns, pattern) end
+      if ok and pattern and pattern.inputs then
+        table.insert(patterns, pattern)
+      end
     end
   end
   return patterns
@@ -885,7 +886,7 @@ end
 -- Auto-update
 -- ============================================================
 
-local VERSION = 2
+local VERSION = 3
 local SCRIPT_PATH = "/home/bec_controller.lua"
 local SHRC_PATH = "/home/.shrc"
 local UPDATE_VERSION_URL = "https://raw.githubusercontent.com/Armisael5/gtnh-bec-controller/main/VERSION"
