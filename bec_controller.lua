@@ -1,6 +1,6 @@
 -- BEC Controller
 -- Author: Armisael/nex5
--- Version: 1
+-- Version: 2
 -- Automates the Bose-Einstein Condensate network: pulls a recipe from
 -- Input Subnet, splits it among the IONodes, tracks nanite tiers as
 -- they change, ships output back to the main network, resets for the
@@ -885,7 +885,7 @@ end
 -- Auto-update
 -- ============================================================
 
-local VERSION = 1
+local VERSION = 2
 local SCRIPT_PATH = "/home/bec_controller.lua"
 local SHRC_PATH = "/home/.shrc"
 local UPDATE_VERSION_URL = "https://raw.githubusercontent.com/Armisael5/gtnh-bec-controller/main/VERSION"
