@@ -66,8 +66,7 @@ Controller, 1 ME Drive, and 2 IO Ports.
   Cell in one IO port, and a 16384k Multi-fluid Storage Cell in the
   other. They should sit unmoved in the left side of the IO Port if
   you've done it correctly.
-- There is a niche failure case regarding fluids and IO Port drive size,
-  I'll note that at the very end.
+- There is a failure case regarding fluids and IO Port drive size, I'll note that at the very end.
 
 ![Pending subnet](images/06-pending-subnet.png)
 ![Pending subnet IO ports](images/07-pending-subnet-ioports.png)
@@ -297,7 +296,7 @@ That's it!
   to do those in the AAL for that reason. There may be other things that
   cause this issue in Gate craft, however at that point you can replace
   the IO Port fluid cell with an Artificial Universe fluid cell, and it
-  will never be an issue.
+  will never be an issue. This also can happen with items, but this is only really possible for gate items (ULV Compressed Circuit Arrays), so make Artificial Universe.
 
 
   There's a Tips & Tricks post for this setup in the GT:NH Discord, feel free to drop any questions or issues you're having in there.
