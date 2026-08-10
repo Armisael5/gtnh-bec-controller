@@ -1,6 +1,6 @@
 -- BEC Controller
 -- Author: Armisael/nex5
--- Version: 4
+-- Version: 5
 -- Automates the Bose-Einstein Condensate network: pulls a recipe from
 -- Input Subnet, splits it among the IONodes, tracks nanite tiers as
 -- they change, ships output back to the main network, resets for the
@@ -275,7 +275,6 @@ local NODE_STARTUP_TIMEOUT = 30
 local NODE_STARTUP_POLL_INTERVAL = 0.3
 local TIER_SWAP_FAILURE_TIMEOUT = 30
 local BLOCK_FILTER = "meow"
-local MAX_NODES = 16
 local IO_PORT_SLOT = 7 -- the ME IO Port's single item slot (both transposers)
 local NANITE_TRANSPOSER_MARKER_SLOT = 12 -- dummy marking the nanite-swap transposer
 local OUTPUT_TRANSPOSER_MARKER_SLOT = 11 -- dummy marking the output-subnet transposer
@@ -343,11 +342,14 @@ local function findRedstone()
   return nil
 end
 
--- Finds the transposer with a permanent dummy item in markerSlot, and
--- returns its address, the marker side, and the other active side. Both
--- the nanite-swap transposer (marker in slot 12) and the output-subnet
--- transposer (marker in slot 11) are this same physical pattern.
-local function findTransposerByMarkerSlot(markerSlot)
+-- Finds every transposer with a permanent dummy item in markerSlot, and
+-- returns a list of {address, markerSide, otherSide}. Both the nanite-swap
+-- transposer(s) (marker in slot 12) and the output-subnet transposer
+-- (marker in slot 11) are this same physical pattern - a build may have
+-- several nanite-swap transposers (for extra parallelism) but only ever
+-- one output transposer.
+local function findAllTransposersByMarkerSlot(markerSlot)
+  local results = {}
   for address in component.list("transposer", true) do
     local transposer = component.proxy(address)
     local activeSides = {}
@@ -365,14 +367,22 @@ local function findTransposerByMarkerSlot(markerSlot)
       for _, side in ipairs(activeSides) do
         if side ~= markerSide then otherSide = side end
       end
-      return address, markerSide, otherSide
+      table.insert(results, { address = address, markerSide = markerSide, otherSide = otherSide })
     end
   end
-  return nil
+  return results
 end
 
-local function findNaniteTransposer()
-  return findTransposerByMarkerSlot(NANITE_TRANSPOSER_MARKER_SLOT)
+local function findTransposerByMarkerSlot(markerSlot)
+  local all = findAllTransposersByMarkerSlot(markerSlot)
+  if #all == 0 then return nil end
+  return all[1].address, all[1].markerSide, all[1].otherSide
+end
+
+-- A build may have multiple nanite-swap transposer sets for extra
+-- parallelism - every one of them gets the same swap action applied.
+local function findAllNaniteTransposers()
+  return findAllTransposersByMarkerSlot(NANITE_TRANSPOSER_MARKER_SLOT)
 end
 
 local function findOutputTransposer()
@@ -389,11 +399,14 @@ local function findDriveSide(transposer, sideA, sideB)
   return nil
 end
 
-local function findStorageBus()
+-- A build may have multiple storage bus adapters supplying nanites in
+-- parallel - every one of them gets the same filter applied.
+local function findAllStorageBuses()
+  local list = {}
   for address in component.list("me_storagebus", true) do
-    return address, component.proxy(address)
+    table.insert(list, { address = address, proxy = component.proxy(address) })
   end
-  return nil
+  return list
 end
 
 -- ============================================================
@@ -532,7 +545,7 @@ end
 -- ============================================================
 
 local function splitParallels(totalCopies, nodeAddresses)
-  local nodesUsed = math.min(totalCopies, #nodeAddresses, MAX_NODES)
+  local nodesUsed = math.min(totalCopies, #nodeAddresses)
   local base = math.floor(totalCopies / nodesUsed)
   local remainder = totalCopies % nodesUsed
 
@@ -578,45 +591,71 @@ end
 -- Nanite swap
 -- ============================================================
 
-local storageBusSide = nil
+-- address -> side, populated by resetStorageBusFilter() for every bus found.
+local storageBusSides = {}
 
+-- Drives every nanite-swap transposer set and every storage bus adapter in
+-- lockstep - all of them get the exact same action, so a build with one of
+-- each behaves identically to today, and a build with several just repeats
+-- the same steps across all of them.
 local function makeNaniteSwapper()
-  local transposerAddress, fillSide, drainSide = findNaniteTransposer()
-  if not transposerAddress then
-    return nil, "could not find nanite-swap transposer"
+  local transposerInfos = findAllNaniteTransposers()
+  if #transposerInfos == 0 then
+    return nil, "could not find any nanite-swap transposer"
   end
-  local transposer = component.proxy(transposerAddress)
-  local storageBusAddress, storageBus = findStorageBus()
-  if not storageBusAddress then
-    return nil, "could not find me_storagebus"
+  local storageBuses = findAllStorageBuses()
+  if #storageBuses == 0 then
+    return nil, "could not find any me_storagebus"
   end
 
-  local function moveTo(targetSide)
-    local driveSide = findDriveSide(transposer, fillSide, drainSide)
-    if not driveSide then return false, "drive not found in slot 7" end
+  local function moveTo(info, targetSide)
+    local transposer = component.proxy(info.address)
+    local driveSide = findDriveSide(transposer, info.markerSide, info.otherSide)
+    if not driveSide then return false, "drive not found in slot 7 on " .. info.address end
     if driveSide == targetSide then return true end
     local ok, err = pcall(transposer.transferItem, driveSide, targetSide, 1, IO_PORT_SLOT, 1)
-    if not ok then return false, "transfer failed: " .. tostring(err) end
+    if not ok then return false, "transfer failed on " .. info.address .. ": " .. tostring(err) end
     os.sleep(SWAP_SETTLE_TIME)
     return true
   end
 
+  -- sideKey is "markerSide" or "otherSide" - each transposer's actual side
+  -- number is looked up per-info, since they can differ transposer to
+  -- transposer.
+  local function moveAllTo(sideKey)
+    for _, info in ipairs(transposerInfos) do
+      local ok, err = moveTo(info, info[sideKey])
+      if not ok then return false, err end
+    end
+    return true
+  end
+
+  local function setAllFilters(tierName)
+    for _, bus in ipairs(storageBuses) do
+      local filterOk, filterResult = pcall(bus.proxy.setStorageOreFilter, storageBusSides[bus.address], tierName)
+      if not filterOk then
+        return false, "setStorageOreFilter on " .. bus.address .. ": " .. tostring(filterResult)
+      end
+    end
+    return true
+  end
+
   local function swapToTier(tierName)
-    local fillOk, fillErr = moveTo(fillSide)
+    local fillOk, fillErr = moveAllTo("markerSide")
     if not fillOk then return false, "move to FillDrive: " .. tostring(fillErr) end
-    local filterOk, filterResult = pcall(storageBus.setStorageOreFilter, storageBusSide, tierName)
-    if not filterOk then return false, "setStorageOreFilter: " .. tostring(filterResult) end
-    local drainOk, drainErr = moveTo(drainSide)
+    local filterOk, filterErr = setAllFilters(tierName)
+    if not filterOk then return false, filterErr end
+    local drainOk, drainErr = moveAllTo("otherSide")
     if not drainOk then return false, "move to EmptyDrive: " .. tostring(drainErr) end
     return true
   end
 
   local function emptyWithoutRefill()
-    local ok1, err1 = moveTo(fillSide)
+    local ok1, err1 = moveAllTo("markerSide")
     if not ok1 then return false, err1 end
-    local filterOk, filterResult = pcall(storageBus.setStorageOreFilter, storageBusSide, BLOCK_FILTER)
-    if not filterOk then return false, "setStorageOreFilter: " .. tostring(filterResult) end
-    local ok2, err2 = moveTo(drainSide)
+    local filterOk, filterErr = setAllFilters(BLOCK_FILTER)
+    if not filterOk then return false, filterErr end
+    local ok2, err2 = moveAllTo("otherSide")
     if not ok2 then return false, err2 end
     return true
   end
@@ -687,22 +726,29 @@ end
 
 -- Tries every side, writing BLOCK_FILTER and reading it back to confirm
 -- which one actually took - that's the real side for this build, and
--- this call already needed to write BLOCK_FILTER at startup anyway.
+-- this call already needed to write BLOCK_FILTER at startup anyway. Runs
+-- independently per storage bus, since each one's side may differ.
 local function resetStorageBusFilter()
-  local address, bus = findStorageBus()
-  if not address then fatalError("could not find me_storagebus at startup") end
-  for side = 0, 5 do
-    local setOk = pcall(bus.setStorageOreFilter, side, BLOCK_FILTER)
-    if setOk then
-      local getOk, filter = pcall(bus.getStorageOreFilter, side)
-      if getOk and filter == BLOCK_FILTER then
-        storageBusSide = side
-        log(LEVEL.DEBUG, "Storage bus side detected: " .. side)
-        return
+  local buses = findAllStorageBuses()
+  if #buses == 0 then fatalError("could not find any me_storagebus at startup") end
+  for _, bus in ipairs(buses) do
+    local found = false
+    for side = 0, 5 do
+      local setOk = pcall(bus.proxy.setStorageOreFilter, side, BLOCK_FILTER)
+      if setOk then
+        local getOk, filter = pcall(bus.proxy.getStorageOreFilter, side)
+        if getOk and filter == BLOCK_FILTER then
+          storageBusSides[bus.address] = side
+          log(LEVEL.DEBUG, "Storage bus " .. bus.address .. " side detected: " .. side)
+          found = true
+          break
+        end
       end
     end
+    if not found then
+      fatalError("could not determine which side storage bus " .. bus.address .. " is on")
+    end
   end
-  fatalError("could not determine which side the storage bus is on")
 end
 
 local function driveHasItems(stack)
@@ -710,16 +756,18 @@ local function driveHasItems(stack)
 end
 
 local function verifyNaniteDriveReady()
-  local transposerAddress, fillSide, drainSide = findNaniteTransposer()
-  if not transposerAddress then fatalError("could not find nanite-swap transposer at startup") end
-  local transposer = component.proxy(transposerAddress)
-  local drive
-  for _, side in ipairs({ fillSide, drainSide }) do
-    local ok, stack = pcall(transposer.getStackInSlot, side, IO_PORT_SLOT)
-    if ok and stack then drive = stack end
+  local transposerInfos = findAllNaniteTransposers()
+  if #transposerInfos == 0 then fatalError("could not find any nanite-swap transposer at startup") end
+  for _, info in ipairs(transposerInfos) do
+    local transposer = component.proxy(info.address)
+    local drive
+    for _, side in ipairs({ info.markerSide, info.otherSide }) do
+      local ok, stack = pcall(transposer.getStackInSlot, side, IO_PORT_SLOT)
+      if ok and stack then drive = stack end
+    end
+    if not drive then fatalError("no drive found in nanite-swap transposer " .. info.address .. " at startup") end
+    if not driveHasItems(drive) then fatalError("nanite drive in transposer " .. info.address .. " is empty at startup") end
   end
-  if not drive then fatalError("no drive found in the nanite-swap transposer at startup") end
-  if not driveHasItems(drive) then fatalError("nanite drive is empty at startup") end
 end
 
 local function verifyOutputDriveReady()
@@ -1035,7 +1083,7 @@ end
 -- Auto-update
 -- ============================================================
 
-local VERSION = 4
+local VERSION = 5
 local SCRIPT_PATH = "/home/bec_controller.lua"
 local SHRC_PATH = "/home/.shrc"
 local CONFIG_PATH = "/home/config.cfg"

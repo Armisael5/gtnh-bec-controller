@@ -301,6 +301,7 @@ That's it!
   cause this issue in Gate craft, however at that point you can replace
   the IO Port fluid cell with an Artificial Universe fluid cell, and it
   will never be an issue. This also can happen with items, but this is only really possible for gate items (ULV Compressed Circuit Arrays), so make Artificial Universe.
+- Multiple observation arrays and more than 16 IONodes are supported. You can duplicate the Nanite subnet multiple times for multiple Observation Arrays, or you can wallshare the nanite busses. Expect unexpected behavior if you have multiple Observation Arrays with different nanite counts in the nanite storage cell.
 
 
   There's a Tips & Tricks post for this setup in the GT:NH Discord, feel free to drop any questions or issues you're having in there.
