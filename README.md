@@ -272,6 +272,10 @@ itself to start automatically on every future boot, so you won't need to
 run it manually again. It also checks for a newer version on
 every startup and updates itself automatically if one's available.
 
+- Auto-run on startup can be disabled in config
+- Auto-update can be disabled in config
+- Discord Webhook integration can be setup in config.
+
 You can use Ctrl+Alt+C to exit the script if needed while it's running.
 
 ![Install](images/31-install.png)
