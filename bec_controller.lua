@@ -1,6 +1,6 @@
 -- BEC Controller
 -- Author: Armisael/nex5
--- Version: 3
+-- Version: 4
 -- Automates the Bose-Einstein Condensate network: pulls a recipe from
 -- Input Subnet, splits it among the IONodes, tracks nanite tiers as
 -- they change, ships output back to the main network, resets for the
@@ -60,7 +60,16 @@ local status = {
   recipeName = nil,
   recipeCopies = nil,
   currentTier = nil,
+  progressPercent = nil, -- reference node's progress only, not a full average
 }
+
+-- Discord webhook settings, populated once from config by startup(). Declared
+-- here (not down in Config, where loadConfig() lives) so fatalError() and
+-- craftAndShip() below can already see them as upvalues.
+local discordWebhookUrl = ""
+local errorPingUserId = ""
+local onlySendErrors = false
+local sendDiscordMessage -- assigned later, once httpRequest() exists
 
 local TIER_DISPLAY_NAMES = {
   Carbon = "Carbon Nanite",
@@ -164,9 +173,15 @@ render = function()
     recipeText = status.recipeName .. "  x" .. tostring(status.recipeCopies)
   end
 
+  local progressText = "-"
+  if status.progressPercent then
+    progressText = status.progressPercent .. "%"
+  end
+
   pcall(gpu.set, 2, 3, "Status:         " .. status.phase)
   pcall(gpu.set, 2, 4, "Recipe:         " .. recipeText)
   pcall(gpu.set, 2, 5, "Requested Tier: " .. (status.currentTier or "-"))
+  pcall(gpu.set, 2, 6, "Progress:       " .. progressText)
 
   pcall(gpu.set, 2, 7, string.rep("_", math.max(0, w - 2)))
 
@@ -211,6 +226,11 @@ local function fatalError(message)
   log(LEVEL.ERROR, message)
   status.phase = "FATAL: " .. message
   render()
+  local content = message
+  if errorPingUserId ~= "" then
+    content = content .. " <@" .. errorPingUserId .. ">"
+  end
+  sendDiscordMessage(content)
   while true do os.sleep(5) end
 end
 
@@ -716,14 +736,228 @@ local function verifyOutputDriveReady()
 end
 
 -- ============================================================
+-- Reference node tracking (nanite tier supply)
+-- ============================================================
+
+-- getWorkMaxProgress() scales with a node's assigned parallel count, so
+-- raw getWorkProgress() isn't comparable across nodes - this normalizes
+-- to a 0-1 fraction that is.
+local function getNodeProgressFraction(node)
+  local progressOk, progress = pcall(node.getWorkProgress)
+  local maxOk, maxProgress = pcall(node.getWorkMaxProgress)
+  if not progressOk or not maxOk or not progress or not maxProgress or maxProgress == 0 then
+    return nil
+  end
+  return progress / maxProgress
+end
+
+-- The reference is whichever active node is least progressed - it's the
+-- one that determines total batch time, so its nanite needs take
+-- priority over any node that's further ahead.
+local function electReference(activeAddresses)
+  local bestAddress, bestFraction
+  for _, address in ipairs(activeAddresses) do
+    local node = component.proxy(address)
+    local fraction = getNodeProgressFraction(node)
+    if fraction and (not bestFraction or fraction < bestFraction) then
+      bestFraction = fraction
+      bestAddress = address
+    end
+  end
+  return bestAddress
+end
+
+-- ============================================================
+-- Crafting + shipping (shared by fresh batches and resumed ones)
+-- ============================================================
+
+local function craftAndShip(assignments, recipeName, recipeCopies, batchStartUptime)
+  status.recipeName = recipeName
+  status.recipeCopies = recipeCopies
+
+  setPhase("Crafting")
+  log(LEVEL.INFO, "Crafting...")
+  local swapper, swapperErr = makeNaniteSwapper()
+  if not swapper then fatalError(tostring(swapperErr)) end
+
+  local function activeAddresses()
+    local list = {}
+    for _, a in ipairs(assignments) do
+      local node = component.proxy(a.address)
+      local ok, hasWork = pcall(node.hasWork)
+      if ok and hasWork then table.insert(list, a.address) end
+    end
+    return list
+  end
+
+  local referenceAddress = electReference(activeAddresses())
+  if not referenceAddress then fatalError("no active IONodes to craft with") end
+  local referenceNode = component.proxy(referenceAddress)
+  log(LEVEL.DEBUG, "Reference node: " .. referenceAddress)
+
+  local currentlyProvidedTier = nil
+  local tierSwapFailureSeconds = 0
+
+  local function applyTier(required)
+    local tierName = TIERS_IN_ORDER[required.tier]
+    if tierName then
+      log(LEVEL.DEBUG, "Required tier changed -> " .. tierName)
+      local ok, err = swapper.swapToTier(tierName)
+      if ok then
+        currentlyProvidedTier = required.tier
+        status.currentTier = humanizeTierName(required.name)
+        tierSwapFailureSeconds = 0
+        render()
+      else
+        log(LEVEL.WARN, "swap FAILED: " .. tostring(err))
+        tierSwapFailureSeconds = tierSwapFailureSeconds + NANITE_POLL_INTERVAL
+      end
+    else
+      log(LEVEL.WARN, "Reference node requires unrecognized tier index "
+        .. tostring(required.tier) .. " - cannot supply nanites.")
+      tierSwapFailureSeconds = tierSwapFailureSeconds + NANITE_POLL_INTERVAL
+    end
+    if tierSwapFailureSeconds >= TIER_SWAP_FAILURE_TIMEOUT then
+      fatalError("nanite tier swap has failed repeatedly for "
+        .. TIER_SWAP_FAILURE_TIMEOUT .. "s - giving up.")
+    end
+  end
+
+  -- Re-elects whenever the followed node finishes or its required tier
+  -- changes - either way, whoever is now least-progressed takes over,
+  -- rather than blindly following the old reference's new want.
+  while true do
+    local active = activeAddresses()
+    if #active == 0 then
+      local elapsed = math.floor(computer.uptime() - batchStartUptime)
+      local minutes = math.floor(elapsed / 60)
+      local seconds = elapsed % 60
+      local timeStr = string.format("%02d:%02d", minutes, seconds)
+      log(LEVEL.INFO, "Recipe finished processing in " .. timeStr)
+      if not onlySendErrors then
+        local displayName = recipeName or "Unknown Item"
+        local displayCopies = recipeCopies
+        if not displayCopies then
+          -- Resumed batches don't know the original total copies - the
+          -- closest available approximation is the currently-tracked
+          -- nodes' assigned counts (won't include any that already
+          -- finished before this resume, if there were any).
+          displayCopies = 0
+          for _, a in ipairs(assignments) do displayCopies = displayCopies + a.count end
+        end
+        sendDiscordMessage(displayName .. " x" .. displayCopies .. " finished processing in " .. timeStr)
+      end
+      break
+    end
+
+    local referenceStillActive = false
+    for _, address in ipairs(active) do
+      if address == referenceAddress then
+        referenceStillActive = true
+        break
+      end
+    end
+
+    local needsReElection = not referenceStillActive
+    local required
+
+    if referenceStillActive then
+      local reqOk, reqResult = pcall(referenceNode.getRequiredTier)
+      if reqOk and reqResult and reqResult.tier then
+        required = reqResult
+        if reqResult.tier ~= currentlyProvidedTier then
+          needsReElection = true
+        end
+      end
+    end
+
+    if needsReElection then
+      local newReference = electReference(active)
+      if newReference then
+        referenceAddress = newReference
+        referenceNode = component.proxy(referenceAddress)
+        log(LEVEL.DEBUG, "Reference node: " .. referenceAddress)
+        local reqOk, reqResult = pcall(referenceNode.getRequiredTier)
+        if reqOk and reqResult and reqResult.tier then
+          required = reqResult
+        end
+      end
+    end
+
+    if required and required.tier ~= currentlyProvidedTier then
+      applyTier(required)
+    end
+
+    -- Reference node only, not a full average across all nodes - 16x
+    -- fewer calls for a very rare, slight accuracy miss.
+    local fraction = getNodeProgressFraction(referenceNode)
+    if fraction then
+      status.progressPercent = math.floor(fraction * 100)
+      render()
+    end
+
+    os.sleep(NANITE_POLL_INTERVAL)
+  end
+
+  setPhase("Emptying nanite bus")
+  local emptyOk, emptyErr = swapper.emptyWithoutRefill()
+  if not emptyOk then fatalError("emptying nanite bus subnet: " .. tostring(emptyErr)) end
+  status.currentTier = nil
+  log(LEVEL.DEBUG, "Nanite bus subnet emptied.")
+
+  setPhase("Shipping output")
+  local shipOk, shipErr = shipOutputToMainnet()
+  if not shipOk then fatalError("shipping output: " .. tostring(shipErr)) end
+  log(LEVEL.DEBUG, "Output shipped to mainnet.")
+
+  -- If anything's left in Input Subnet, it wasn't fully consumed
+  -- Probably a multiplied pattern
+  -- Don't send drives back and risk recipes being combined
+  local remaining = getInputSubnetItemCount()
+  if remaining == nil then
+    fatalError("could not verify Input Subnet is empty after shipping output")
+  elseif remaining > 0 then
+    fatalError("Input Subnet still has " .. remaining .. " item(s) after shipping output - "
+      .. "refusing to return drives to Pending Subnet.")
+  end
+
+  setPhase("Returning input drives")
+  local pulseOk, pulseErr = pulseRedstoneReturnDrives()
+  if not pulseOk then fatalError("redstone pulse: " .. tostring(pulseErr)) end
+  log(LEVEL.DEBUG, "Drive-return pulse sent.")
+end
+
+-- ============================================================
 -- One full cycle
 -- ============================================================
+
+local function findInProgressAssignments()
+  local assignments = {}
+  for address in component.list("bec_io_node", true) do
+    local node = component.proxy(address)
+    local workOk, hasWork = pcall(node.hasWork)
+    if workOk and hasWork then
+      local countOk, count = pcall(node.getMaxParallel)
+      table.insert(assignments, { address = address, count = (countOk and count) or 0 })
+    end
+  end
+  return assignments
+end
 
 local function runOneCycle()
   status.recipeName = nil
   status.recipeCopies = nil
   status.currentTier = nil
+  status.progressPercent = nil
   render()
+
+  local resumedAssignments = findInProgressAssignments()
+  if #resumedAssignments > 0 then
+    logSeparator()
+    log(LEVEL.WARN, "Resuming " .. #resumedAssignments .. " in-progress IONode(s) from before restart.")
+    craftAndShip(resumedAssignments, nil, nil, computer.uptime())
+    return
+  end
 
   local recipe = waitForRecipe()
   local batchStartUptime = computer.uptime()
@@ -794,133 +1028,31 @@ local function runOneCycle()
       .. table.concat(stuck, ", "))
   end
 
-  setPhase("Crafting")
-  log(LEVEL.INFO, "Crafting...")
-  local swapper, swapperErr = makeNaniteSwapper()
-  if not swapper then fatalError(tostring(swapperErr)) end
-
-  -- Reference node: one with the highest assigned count (the "slow" group)
-  table.sort(assignments, function(x, y) return x.count > y.count end)
-  local referenceAddress = assignments[1].address
-  local referenceNode = component.proxy(referenceAddress)
-  log(LEVEL.DEBUG, "Reference node: " .. referenceAddress .. " (" .. assignments[1].count .. ")")
-
-  local currentlyProvidedTier = nil
-  local tierSwapFailureSeconds = 0
-  while true do
-    local allDone = true
-    for _, a in ipairs(assignments) do
-      local node = component.proxy(a.address)
-      local ok, hasWork = pcall(node.hasWork)
-      if not (ok and not hasWork) then
-        allDone = false
-        break
-      end
-    end
-    if allDone then
-      local elapsed = math.floor(computer.uptime() - batchStartUptime)
-      local minutes = math.floor(elapsed / 60)
-      local seconds = elapsed % 60
-      log(LEVEL.INFO, string.format("Recipe finished processing in %02d:%02d", minutes, seconds))
-      break
-    end
-
-    local reqOk, required = pcall(referenceNode.getRequiredTier)
-    if reqOk and required and required.tier and required.tier ~= currentlyProvidedTier then
-      local tierName = TIERS_IN_ORDER[required.tier]
-      if tierName then
-        log(LEVEL.DEBUG, "Required tier changed -> " .. tierName)
-        local ok, err = swapper.swapToTier(tierName)
-        if ok then
-          currentlyProvidedTier = required.tier
-          status.currentTier = humanizeTierName(required.name)
-          tierSwapFailureSeconds = 0
-          render()
-        else
-          log(LEVEL.WARN, "swap FAILED: " .. tostring(err))
-          tierSwapFailureSeconds = tierSwapFailureSeconds + NANITE_POLL_INTERVAL
-        end
-      else
-        log(LEVEL.WARN, "Reference node requires unrecognized tier index "
-          .. tostring(required.tier) .. " - cannot supply nanites.")
-        tierSwapFailureSeconds = tierSwapFailureSeconds + NANITE_POLL_INTERVAL
-      end
-      if tierSwapFailureSeconds >= TIER_SWAP_FAILURE_TIMEOUT then
-        fatalError("nanite tier swap has failed repeatedly for "
-          .. TIER_SWAP_FAILURE_TIMEOUT .. "s - giving up.")
-      end
-    end
-
-    os.sleep(NANITE_POLL_INTERVAL)
-  end
-
-  setPhase("Emptying nanite bus")
-  local emptyOk, emptyErr = swapper.emptyWithoutRefill()
-  if not emptyOk then fatalError("emptying nanite bus subnet: " .. tostring(emptyErr)) end
-  status.currentTier = nil
-  log(LEVEL.DEBUG, "Nanite bus subnet emptied.")
-
-  setPhase("Shipping output")
-  local shipOk, shipErr = shipOutputToMainnet()
-  if not shipOk then fatalError("shipping output: " .. tostring(shipErr)) end
-  log(LEVEL.DEBUG, "Output shipped to mainnet.")
-
-  -- If anything's left in Input Subnet, it wasn't fully consumed
-  -- Probably a multiplied pattern
-  -- Don't send drives back and risk recipes being combined
-  local remaining = getInputSubnetItemCount()
-  if remaining == nil then
-    fatalError("could not verify Input Subnet is empty after shipping output")
-  elseif remaining > 0 then
-    fatalError("Input Subnet still has " .. remaining .. " item(s) after shipping output - "
-      .. "refusing to return drives to Pending Subnet.")
-  end
-
-  setPhase("Returning input drives")
-  local pulseOk, pulseErr = pulseRedstoneReturnDrives()
-  if not pulseOk then fatalError("redstone pulse: " .. tostring(pulseErr)) end
-  log(LEVEL.DEBUG, "Drive-return pulse sent.")
+  craftAndShip(assignments, recipe.name, recipe.copies, batchStartUptime)
 end
 
 -- ============================================================
 -- Auto-update
 -- ============================================================
 
-local VERSION = 3
+local VERSION = 4
 local SCRIPT_PATH = "/home/bec_controller.lua"
 local SHRC_PATH = "/home/.shrc"
+local CONFIG_PATH = "/home/config.cfg"
 local UPDATE_VERSION_URL = "https://raw.githubusercontent.com/Armisael5/gtnh-bec-controller/main/VERSION"
 local UPDATE_SCRIPT_URL = "https://raw.githubusercontent.com/Armisael5/gtnh-bec-controller/main/bec_controller.lua"
 
--- .shrc runs automatically whenever a shell starts, including at boot. If
--- this script isn't already registered there, add it - so running it once
--- after downloading is all a user has to do to get auto-run on future boots.
-local function ensureAutorun()
-  local content = ""
-  local readFile = io.open(SHRC_PATH, "r")
-  if readFile then
-    content = readFile:read("*a") or ""
-    readFile:close()
-  end
-  if content:find(SCRIPT_PATH, 1, true) then return end
+-- ============================================================
+-- Networking
+-- ============================================================
 
-  local appendFile = io.open(SHRC_PATH, "a")
-  if not appendFile then
-    log(LEVEL.WARN, "couldn't register autorun in " .. SHRC_PATH)
-    return
-  end
-  appendFile:write(SCRIPT_PATH .. "\n")
-  appendFile:close()
-  log(LEVEL.DEBUG, "Registered autorun in " .. SHRC_PATH .. " - will start automatically on boot.")
-end
-
-local function httpGet(url)
+local function httpRequest(url, postData, headers)
   local internetAddress
   for address in component.list("internet", true) do internetAddress = address end
   if not internetAddress then return nil, "no Internet Card found" end
   local internet = component.proxy(internetAddress)
 
-  local requestOk, handle = pcall(internet.request, url)
+  local requestOk, handle = pcall(internet.request, url, postData, headers)
   if not requestOk or not handle then
     return nil, "request failed: " .. tostring(handle)
   end
@@ -944,6 +1076,136 @@ local function httpGet(url)
       os.sleep(0.1)
     end
   end
+end
+
+local function httpGet(url)
+  return httpRequest(url, nil, nil)
+end
+
+-- ============================================================
+-- Discord notifications
+-- ============================================================
+
+local IONODE_ICON_URL = "https://raw.githubusercontent.com/Armisael5/gtnh-bec-controller/refs/heads/main/images/IONode_icon.png"
+
+local function jsonEscapeString(str)
+  return (str:gsub('[%c"\\]', function(c)
+    if c == '"' then return '\\"'
+    elseif c == '\\' then return '\\\\'
+    elseif c == '\n' then return '\\n'
+    elseif c == '\r' then return '\\r'
+    elseif c == '\t' then return '\\t'
+    else return string.format('\\u%04x', string.byte(c))
+    end
+  end))
+end
+
+-- Fills in the forward-declared local from Logging + display, so
+-- fatalError() (defined long before this section runs) can already call it.
+sendDiscordMessage = function(content)
+  if discordWebhookUrl == "" then return end
+  local body = '{"content":"' .. jsonEscapeString(content) .. '"'
+    .. ',"username":"BEC Controller"'
+    .. ',"avatar_url":"' .. IONODE_ICON_URL .. '"}'
+  local headers = { ["Content-Type"] = "application/json" }
+  local ok, err = httpRequest(discordWebhookUrl, body, headers)
+  if not ok then
+    log(LEVEL.WARN, "Discord webhook failed: " .. tostring(err))
+  end
+end
+
+-- All settings default to off/true-compatible values if the file is missing
+-- or a line can't be parsed, so existing installs (no config file yet, or
+-- one predating the Discord fields) keep today's behavior exactly. Only
+-- ever written once, on first run - an existing file (even a partial one)
+-- is never overwritten, so user edits always stick.
+local function loadConfig()
+  local config = {
+    enableAutoUpdate = true,
+    enableAutoStart = true,
+    discordWebhookUrl = "",
+    errorPingUserId = "",
+    onlySendErrors = false,
+  }
+  local file = io.open(CONFIG_PATH, "r")
+  if file then
+    for line in file:lines() do
+      local key, rawValue = line:match("^%s*(%a+)%s*=%s*(.-)%s*$")
+      -- Accept values with or without surrounding quotes.
+      local value = rawValue and (rawValue:match('^"(.*)"$') or rawValue:match("^'(.*)'$") or rawValue)
+      if key == "enableAutoUpdate" or key == "enableAutoStart" then
+        config[key] = (value:lower() == "true")
+      elseif key == "discordWebhookURL" then
+        config.discordWebhookUrl = value
+      elseif key == "errorPingUserID" then
+        config.errorPingUserId = value
+      elseif key == "onlySendErrors" then
+        config.onlySendErrors = (value:lower() == "true")
+      end
+    end
+    file:close()
+  else
+    local writeFile = io.open(CONFIG_PATH, "w")
+    if writeFile then
+      writeFile:write("enableAutoUpdate=true\n")
+      writeFile:write("enableAutoStart=true\n")
+      writeFile:write("discordWebhookURL=\n")
+      writeFile:write("errorPingUserID=\n")
+      writeFile:write("onlySendErrors=false\n")
+      writeFile:close()
+    end
+  end
+  return config
+end
+
+-- .shrc runs automatically whenever a shell starts, including at boot. If
+-- this script isn't already registered there, add it - so running it once
+-- after downloading is all a user has to do to get auto-run on future boots.
+local function ensureAutorun()
+  local content = ""
+  local readFile = io.open(SHRC_PATH, "r")
+  if readFile then
+    content = readFile:read("*a") or ""
+    readFile:close()
+  end
+  if content:find(SCRIPT_PATH, 1, true) then return end
+
+  local appendFile = io.open(SHRC_PATH, "a")
+  if not appendFile then
+    log(LEVEL.WARN, "couldn't register autorun in " .. SHRC_PATH)
+    return
+  end
+  appendFile:write(SCRIPT_PATH .. "\n")
+  appendFile:close()
+  log(LEVEL.DEBUG, "Registered autorun in " .. SHRC_PATH .. " - will start automatically on boot.")
+end
+
+-- The other half of ensureAutorun - takes the entry back out if
+-- enableAutoStart=false, so disabling it actually does something even
+-- when the script already registered itself on some earlier run.
+local function removeAutorun()
+  local file = io.open(SHRC_PATH, "r")
+  if not file then return end
+  local content = file:read("*a") or ""
+  file:close()
+  if not content:find(SCRIPT_PATH, 1, true) then return end
+
+  local kept = {}
+  for line in (content .. "\n"):gmatch("(.-)\n") do
+    if not line:find(SCRIPT_PATH, 1, true) then
+      table.insert(kept, line)
+    end
+  end
+
+  local writeFile = io.open(SHRC_PATH, "w")
+  if not writeFile then
+    log(LEVEL.WARN, "couldn't unregister autorun in " .. SHRC_PATH)
+    return
+  end
+  writeFile:write(table.concat(kept, "\n"))
+  if #kept > 0 then writeFile:write("\n") end
+  writeFile:close()
+  log(LEVEL.DEBUG, "Removed autorun entry from " .. SHRC_PATH .. " (enableAutoStart=false).")
 end
 
 -- Set instead of acted on directly - the reboot that applies an update has
@@ -987,11 +1249,23 @@ end
 -- ============================================================
 
 local function startup()
+  setPhase("Starting Up (Loading Config)")
+  local config = loadConfig()
+  discordWebhookUrl = config.discordWebhookUrl
+  errorPingUserId = config.errorPingUserId
+  onlySendErrors = config.onlySendErrors
+
   setPhase("Starting Up (Registering Autorun)")
-  ensureAutorun()
+  if config.enableAutoStart then
+    ensureAutorun()
+  else
+    removeAutorun()
+  end
 
   setPhase("Starting Up (Checking for Updates)")
-  checkForUpdate()
+  if config.enableAutoUpdate then
+    checkForUpdate()
+  end
   if updateApplied then return end
 
   setPhase("Starting Up (Syncing Real Time)")
