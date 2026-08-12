@@ -1,6 +1,6 @@
 -- BEC Controller
 -- Author: Armisael/nex5
--- Version: 5
+-- Version: 6
 -- Automates the Bose-Einstein Condensate network: pulls a recipe from
 -- Input Subnet, splits it among the IONodes, tracks nanite tiers as
 -- they change, ships output back to the main network, resets for the
@@ -531,6 +531,17 @@ local function getInputSubnetItemCount()
   return count
 end
 
+-- Returns whether the Containment Field still holds any condensate, or nil
+-- if bec_storage couldn't be reached.
+local function containmentFieldHasCondensate()
+  local address, storage = findBecStorage()
+  if not address then return nil end
+  local ok, condensate = pcall(storage.getStoredCondensate)
+  if not ok or not condensate then return nil end
+  for _ in pairs(condensate) do return true end
+  return false
+end
+
 local function waitForRecipe()
   setPhase("Waiting for recipe")
   while true do
@@ -969,6 +980,13 @@ local function craftAndShip(assignments, recipeName, recipeCopies, batchStartUpt
       .. "refusing to return drives to Pending Subnet.")
   end
 
+  local hasCondensate = containmentFieldHasCondensate()
+  if hasCondensate == nil then
+    fatalError("could not verify Containment Field condensate is empty after shipping output")
+  elseif hasCondensate then
+    fatalError("Leftover condensate in Containment Field, refusing to return drives to prevent potential voiding")
+  end
+
   setPhase("Returning input drives")
   local pulseOk, pulseErr = pulseRedstoneReturnDrives()
   if not pulseOk then fatalError("redstone pulse: " .. tostring(pulseErr)) end
@@ -1083,7 +1101,7 @@ end
 -- Auto-update
 -- ============================================================
 
-local VERSION = 5
+local VERSION = 6
 local SCRIPT_PATH = "/home/bec_controller.lua"
 local SHRC_PATH = "/home/.shrc"
 local CONFIG_PATH = "/home/config.cfg"
