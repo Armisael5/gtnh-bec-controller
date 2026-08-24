@@ -1,6 +1,6 @@
 -- BEC Controller
 -- Author: Armisael/nex5
--- Version: 6
+-- Version: 7
 -- Automates the Bose-Einstein Condensate network: pulls a recipe from
 -- Input Subnet, splits it among the IONodes, tracks nanite tiers as
 -- they change, ships output back to the main network, resets for the
@@ -10,6 +10,7 @@ local component = require("component")
 local computer = require("computer")
 local filesystem = require("filesystem")
 local sides = require("sides")
+local event = require("event")
 
 -- ============================================================
 -- Logging + display
@@ -270,7 +271,7 @@ local OUTPUT_SETTLE_TIME = 0.1
 local REDSTONE_PULSE_DURATION = 0.2
 local NANITE_POLL_INTERVAL = 0.3
 local GATE_POLL_INTERVAL = 0.5
-local RECIPE_POLL_INTERVAL = 0.5
+local RECIPE_EVENT_TIMEOUT = 60
 local NODE_STARTUP_TIMEOUT = 30
 local NODE_STARTUP_POLL_INTERVAL = 0.3
 local TIER_SWAP_FAILURE_TIMEOUT = 30
@@ -306,6 +307,10 @@ local function getInputInterface()
   end
   local address, proxy = findMarkedInterface("Input")
   inputInterfaceAddress = address
+  if proxy then
+      -- Set listener for item changes on Input Subnet
+    pcall(proxy.setItemEventSubscription, true)
+  end
   return address, proxy
 end
 
@@ -547,7 +552,15 @@ local function waitForRecipe()
   while true do
     local recipe = tryIdentifyRecipe()
     if recipe then return recipe end
-    os.sleep(RECIPE_POLL_INTERVAL)
+    local signal = event.pull(RECIPE_EVENT_TIMEOUT, "network_item_changed")
+    if not signal then
+      -- No event arrived within the timeout
+      -- Reassert the subscription in case it expired for some reason
+      local _, inputProxy = getInputInterface()
+      if inputProxy then
+        pcall(inputProxy.setItemEventSubscription, true)
+      end
+    end
   end
 end
 
@@ -1101,7 +1114,7 @@ end
 -- Auto-update
 -- ============================================================
 
-local VERSION = 6
+local VERSION = 7
 local SCRIPT_PATH = "/home/bec_controller.lua"
 local SHRC_PATH = "/home/.shrc"
 local CONFIG_PATH = "/home/config.cfg"
