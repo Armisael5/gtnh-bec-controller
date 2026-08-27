@@ -217,7 +217,7 @@ Next, we need a few Adapters for AE2, as well as two Transposers. These
 can be done using P2P or by running a cable. I opted to just run cable
 underground for mine. You will also need MFUs from OpenComputers. Use
 these by shift right clicking a block, then placing the MFU into an
-Adapter.
+Adapter. MFUs have a range of 3 blocks, or else they may not work properly.
 
 We need 1 Adapter that is MFU'd on the Input Subnet interface.
 
