@@ -1,6 +1,6 @@
 -- BEC Controller
 -- Author: Armisael/nex5
--- Version: 7
+-- Version: 8
 -- Automates the Bose-Einstein Condensate network: pulls a recipe from
 -- Input Subnet, splits it among the IONodes, tracks nanite tiers as
 -- they change, ships output back to the main network, resets for the
@@ -449,20 +449,25 @@ local function getCachedPatterns(forceRescan)
 end
 
 local function tryMatch(pattern, stock)
-  local patternKeys = {}
-  local minCopies = nil
+  -- Match a recipe pattern against the current stock of items in the Input Subnet
+  local required = {}
   for _, ingredient in ipairs(pattern.inputs) do
     if not isFluidEntry(ingredient) then
       local key = ingredient.name .. ":" .. tostring(ingredient.damage)
-      patternKeys[key] = true
-      local have = stock[key] or 0
-      if have < ingredient.size then return nil end
-      local copies = math.floor(have / ingredient.size)
-      if minCopies == nil or copies < minCopies then minCopies = copies end
+      required[key] = (required[key] or 0) + ingredient.size
     end
   end
+
+  local minCopies = nil
+  for key, size in pairs(required) do
+    local have = stock[key] or 0
+    if have < size then return nil end
+    local copies = math.floor(have / size)
+    if minCopies == nil or copies < minCopies then minCopies = copies end
+  end
+
   for key in pairs(stock) do
-    if not patternKeys[key] then return nil end
+    if not required[key] then return nil end
   end
   return minCopies
 end
@@ -1114,7 +1119,7 @@ end
 -- Auto-update
 -- ============================================================
 
-local VERSION = 7
+local VERSION = 8
 local SCRIPT_PATH = "/home/bec_controller.lua"
 local SHRC_PATH = "/home/.shrc"
 local CONFIG_PATH = "/home/config.cfg"
