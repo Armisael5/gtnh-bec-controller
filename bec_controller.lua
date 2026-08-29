@@ -1,6 +1,6 @@
 -- BEC Controller
 -- Author: Armisael/nex5
--- Version: 8
+-- Version: 9
 -- Automates the Bose-Einstein Condensate network: pulls a recipe from
 -- Input Subnet, splits it among the IONodes, tracks nanite tiers as
 -- they change, ships output back to the main network, resets for the
@@ -10,7 +10,6 @@ local component = require("component")
 local computer = require("computer")
 local filesystem = require("filesystem")
 local sides = require("sides")
-local event = require("event")
 
 -- ============================================================
 -- Logging + display
@@ -64,9 +63,6 @@ local status = {
   progressPercent = nil, -- reference node's progress only, not a full average
 }
 
--- Discord webhook settings, populated once from config by startup(). Declared
--- here (not down in Config, where loadConfig() lives) so fatalError() and
--- craftAndShip() below can already see them as upvalues.
 local discordWebhookUrl = ""
 local errorPingUserId = ""
 local onlySendErrors = false
@@ -203,10 +199,6 @@ local function setPhase(phase)
   render()
 end
 
--- OpenComputers' built-in interrupt (Ctrl+Alt+C) raises a plain Lua error
--- with this message - just as catchable as any other error, not a special
--- hard-kill. Any pcall boundary that sees it should treat it as a clean
--- shutdown request rather than an unexpected crash.
 local function isInterrupted(err)
   return tostring(err):find("interrupted", 1, true) ~= nil
 end
@@ -271,7 +263,7 @@ local OUTPUT_SETTLE_TIME = 0.1
 local REDSTONE_PULSE_DURATION = 0.2
 local NANITE_POLL_INTERVAL = 0.3
 local GATE_POLL_INTERVAL = 0.5
-local RECIPE_EVENT_TIMEOUT = 60
+local RECIPE_POLL_INTERVAL = 0.3
 local NODE_STARTUP_TIMEOUT = 30
 local NODE_STARTUP_POLL_INTERVAL = 0.3
 local TIER_SWAP_FAILURE_TIMEOUT = 30
@@ -307,10 +299,6 @@ local function getInputInterface()
   end
   local address, proxy = findMarkedInterface("Input")
   inputInterfaceAddress = address
-  if proxy then
-      -- Set listener for item changes on Input Subnet
-    pcall(proxy.setItemEventSubscription, true)
-  end
   return address, proxy
 end
 
@@ -347,12 +335,6 @@ local function findRedstone()
   return nil
 end
 
--- Finds every transposer with a permanent dummy item in markerSlot, and
--- returns a list of {address, markerSide, otherSide}. Both the nanite-swap
--- transposer(s) (marker in slot 12) and the output-subnet transposer
--- (marker in slot 11) are this same physical pattern - a build may have
--- several nanite-swap transposers (for extra parallelism) but only ever
--- one output transposer.
 local function findAllTransposersByMarkerSlot(markerSlot)
   local results = {}
   for address in component.list("transposer", true) do
@@ -557,15 +539,7 @@ local function waitForRecipe()
   while true do
     local recipe = tryIdentifyRecipe()
     if recipe then return recipe end
-    local signal = event.pull(RECIPE_EVENT_TIMEOUT, "network_item_changed")
-    if not signal then
-      -- No event arrived within the timeout
-      -- Reassert the subscription in case it expired for some reason
-      local _, inputProxy = getInputInterface()
-      if inputProxy then
-        pcall(inputProxy.setItemEventSubscription, true)
-      end
-    end
+    os.sleep(RECIPE_POLL_INTERVAL)
   end
 end
 
@@ -753,10 +727,6 @@ local function resetAllIoNodesOff()
   log(LEVEL.DEBUG, "Disabled " .. count .. " IONode(s) at startup.")
 end
 
--- Tries every side, writing BLOCK_FILTER and reading it back to confirm
--- which one actually took - that's the real side for this build, and
--- this call already needed to write BLOCK_FILTER at startup anyway. Runs
--- independently per storage bus, since each one's side may differ.
 local function resetStorageBusFilter()
   local buses = findAllStorageBuses()
   if #buses == 0 then fatalError("could not find any me_storagebus at startup") end
@@ -900,9 +870,6 @@ local function craftAndShip(assignments, recipeName, recipeCopies, batchStartUpt
     end
   end
 
-  -- Re-elects whenever the followed node finishes or its required tier
-  -- changes - either way, whoever is now least-progressed takes over,
-  -- rather than blindly following the old reference's new want.
   while true do
     local active = activeAddresses()
     if #active == 0 then
@@ -915,10 +882,6 @@ local function craftAndShip(assignments, recipeName, recipeCopies, batchStartUpt
         local displayName = recipeName or "Unknown Item"
         local displayCopies = recipeCopies
         if not displayCopies then
-          -- Resumed batches don't know the original total copies - the
-          -- closest available approximation is the currently-tracked
-          -- nodes' assigned counts (won't include any that already
-          -- finished before this resume, if there were any).
           displayCopies = 0
           for _, a in ipairs(assignments) do displayCopies = displayCopies + a.count end
         end
@@ -1119,7 +1082,7 @@ end
 -- Auto-update
 -- ============================================================
 
-local VERSION = 8
+local VERSION = 9
 local SCRIPT_PATH = "/home/bec_controller.lua"
 local SHRC_PATH = "/home/.shrc"
 local CONFIG_PATH = "/home/config.cfg"
@@ -1198,11 +1161,6 @@ sendDiscordMessage = function(content)
   end
 end
 
--- All settings default to off/true-compatible values if the file is missing
--- or a line can't be parsed, so existing installs (no config file yet, or
--- one predating the Discord fields) keep today's behavior exactly. Only
--- ever written once, on first run - an existing file (even a partial one)
--- is never overwritten, so user edits always stick.
 local function loadConfig()
   local config = {
     enableAutoUpdate = true,
@@ -1264,9 +1222,6 @@ local function ensureAutorun()
   log(LEVEL.DEBUG, "Registered autorun in " .. SHRC_PATH .. " - will start automatically on boot.")
 end
 
--- The other half of ensureAutorun - takes the entry back out if
--- enableAutoStart=false, so disabling it actually does something even
--- when the script already registered itself on some earlier run.
 local function removeAutorun()
   local file = io.open(SHRC_PATH, "r")
   if not file then return end
@@ -1292,9 +1247,6 @@ local function removeAutorun()
   log(LEVEL.DEBUG, "Removed autorun entry from " .. SHRC_PATH .. " (enableAutoStart=false).")
 end
 
--- Set instead of acted on directly - the reboot that applies an update has
--- to happen outside any pcall (same rule as os.exit/performShutdown), so
--- this just signals startup() to stop early and let the caller reboot.
 local updateApplied = false
 
 local function checkForUpdate()
