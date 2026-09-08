@@ -295,7 +295,7 @@ will automatically determine which mode you are setup for when it is
 started. The following steps will assume you have already complete all
 the previous steps.
 
-![Diode](images/32-Diode.png)
+![Diode](images/32-diode.png)
 
 Setup a Maxwell Gate, with the Entangler & Condensate Storage on the
 LEFT side, and the Observation Array on RIGHT side. Putting them on the
@@ -305,6 +305,9 @@ You need more fluid storage on the input subnet if you are doing Passive mode.
 Add an Insert-Only fluid storage bus, connected to 2 full ME drives with
 Fluid Digital Singularity cells. This should be connected directly to the
 stocking hatch on the Entangler.
+
+Remove any other fluid storage on the Input Subnet.
+
 ![Fluid Storage](images/33-fluid-storage.png)
 
 Manually add an amount of each fluid that you want to keep in stock. If you
