@@ -1,10 +1,14 @@
 -- BEC Controller
 -- Author: Armisael/nex5
--- Version: 9
+-- Version: 10
 -- Automates the Bose-Einstein Condensate network: pulls a recipe from
 -- Input Subnet, splits it among the IONodes, tracks nanite tiers as
 -- they change, ships output back to the main network, resets for the
 -- next batch. Loops forever. Ctrl+Alt+C to exit.
+--
+-- Runs in Passive mode (Diode-gated) if a bec_diode is present, or
+-- Nonpassive mode (pre-Diode Entangler gate) otherwise - chosen once at
+-- startup, see detectMode().
 
 local component = require("component")
 local computer = require("computer")
@@ -271,6 +275,16 @@ local BLOCK_FILTER = "meow"
 local IO_PORT_SLOT = 7 -- the ME IO Port's single item slot (both transposers)
 local NANITE_TRANSPOSER_MARKER_SLOT = 12 -- dummy marking the nanite-swap transposer
 local OUTPUT_TRANSPOSER_MARKER_SLOT = 11 -- dummy marking the output-subnet transposer
+local DIODE_WATER_SLOT = 19 -- always-on filter so the Diode never blocks everything
+local DIODE_WATER_FLUID = "water"
+local DIODE_RECIPE_FILTER_SLOTS = { 1, 2, 3, 4 } -- max 4 distinct fluids per BEC recipe
+
+-- Passive mode (Diode-gated, waits on calculated condensate amounts) vs.
+-- Nonpassive mode (pre-Diode behavior: waits on Entangler idle + empty
+-- Input Subnet fluids, and requires condensate fully drained each batch).
+-- Decided once at startup by detectMode(), based on whether a bec_diode is
+-- present in the build.
+local PASSIVE_MODE = false
 
 -- ============================================================
 -- Discovery helpers
@@ -310,6 +324,20 @@ local function findAllIoNodes()
   return list
 end
 
+local function findBecStorage()
+  for address in component.list("bec_storage", true) do
+    return address, component.proxy(address)
+  end
+  return nil
+end
+
+local function findBecDiode()
+  for address in component.list("bec_diode", true) do
+    return address, component.proxy(address)
+  end
+  return nil
+end
+
 local function findGtMachineByName(name)
   for address in component.list("gt_machine", true) do
     local proxy = component.proxy(address)
@@ -321,11 +349,13 @@ local function findGtMachineByName(name)
   return nil
 end
 
-local function findBecStorage()
-  for address in component.list("bec_storage", true) do
-    return address, component.proxy(address)
-  end
-  return nil
+-- Chooses Passive vs. Nonpassive mode based on whether a Diode is present -
+-- called once at startup.
+local function detectMode()
+  local diodeAddress = findBecDiode()
+  PASSIVE_MODE = (diodeAddress ~= nil)
+  log(LEVEL.INFO, "Diode " .. (PASSIVE_MODE and "detected" or "not detected")
+    .. " - running in " .. (PASSIVE_MODE and "Passive" or "Nonpassive") .. " mode.")
 end
 
 local function findRedstone()
@@ -402,6 +432,36 @@ end
 
 local function isFluidEntry(entry)
   return entry.amount ~= nil and entry.damage == nil
+end
+
+local ENTANGLED_FLUID_NAMES = {
+  ["molten.bedrockium"] = "entangled_bedrockium",
+  ["molten.celestialtungsten"] = "entangled_celestialtungsten",
+  ["molten.chromaticglass"] = "entangled_chromaticglass",
+  ["molten.cosmicneutronium"] = "entangled_cosmicneutronium",
+  ["molten.eternity"] = "entangled_eternity",
+  ["molten.hypogen"] = "entangled_hypogen",
+  ["molten.infinity"] = "entangled_infinity",
+  ["molten.magmatter"] = "entangled_magmatter",
+  ["molten.magnetohydrodynamicallyconstrainedstarmatter"] = "entangled_mhdcsm",
+  ["molten.neutronium"] = "entangled_neutronium",
+  ["molten.spacetime"] = "entangled_spacetime",
+  ["molten.transcendentmetal"] = "entangled_transcendentmetal",
+  ["molten.universium"] = "entangled_universium",
+  ["phononmedium"] = "entangled_phononmedium",
+  ["quarkgluonplasma"] = "entangled_quarkgluonplasma",
+  ["spatialfluid"] = "entangled_space",
+  ["dimensionallyshiftedsuperfluid"] = "entangled_dimshiftedsuperfluid",
+  ["temporalfluid"] = "entangled_time",
+  ["boundlesscosmicsolder"] = "entangled_cosmicsolder",
+}
+
+local function entangledFluidName(plainName)
+  local entangled = ENTANGLED_FLUID_NAMES[plainName]
+  if not entangled then
+    fatalError("no known Entangled fluid for '" .. plainName .. "' - add it to ENTANGLED_FLUID_NAMES")
+  end
+  return entangled
 end
 
 local function scanRecipePatterns()
@@ -504,7 +564,25 @@ local function tryIdentifyRecipe()
   end
 
   local outputLabel = stripFormatting(matched.outputs and matched.outputs[1] and matched.outputs[1].label or "?")
-  return { copies = copies, name = outputLabel }
+
+  local fluids = {}
+  if PASSIVE_MODE then
+    for _, ingredient in ipairs(matched.inputs) do
+      if isFluidEntry(ingredient) then
+        table.insert(fluids, {
+          plainName = ingredient.name,
+          entangledName = entangledFluidName(ingredient.name),
+          amountPerCopy = ingredient.amount,
+        })
+      end
+    end
+    if #fluids > #DIODE_RECIPE_FILTER_SLOTS then
+      fatalError(outputLabel .. " recipe has " .. #fluids .. " fluid ingredients, more than the "
+        .. #DIODE_RECIPE_FILTER_SLOTS .. " the Diode can filter for.")
+    end
+  end
+
+  return { copies = copies, name = outputLabel, fluids = fluids }
 end
 
 -- Returns how many items (excluding the "Input" marker) are currently in
@@ -523,8 +601,8 @@ local function getInputSubnetItemCount()
   return count
 end
 
--- Returns whether the Containment Field still holds any condensate, or nil
--- if bec_storage couldn't be reached.
+-- Nonpassive mode only: returns whether the Containment Field still holds
+-- any condensate, or nil if bec_storage couldn't be reached.
 local function containmentFieldHasCondensate()
   local address, storage = findBecStorage()
   if not address then return nil end
@@ -565,6 +643,21 @@ end
 -- Step 3: gate check
 -- ============================================================
 
+-- Passive mode: true once bec_storage holds at least the required amount of
+-- every Entangled fluid this recipe needs, scaled by total copies.
+local function checkCondensateGate(storageProxy, recipe)
+  local ok, condensate = pcall(storageProxy.getStoredCondensate)
+  if not ok or not condensate then return false end
+  for _, fluid in ipairs(recipe.fluids) do
+    local needed = fluid.amountPerCopy * recipe.copies
+    local have = condensate[fluid.entangledName] or 0
+    if have < needed then return false end
+  end
+  return true
+end
+
+-- Nonpassive mode: the pre-Diode gate - Entangler idle, Input Subnet fluids
+-- fully consumed, and some condensate present.
 local function checkGate(entanglerProxy, storageProxy)
   local hasWorkOk, hasWork = pcall(entanglerProxy.hasWork)
   local activeOk, active = pcall(entanglerProxy.isMachineActive)
@@ -588,6 +681,77 @@ local function checkGate(entanglerProxy, storageProxy)
   end
 
   return entanglerIdle and inputEmpty and hasCondensate
+end
+
+-- ============================================================
+-- Diode (Maxwell Gate) condensate filters
+-- ============================================================
+
+-- Sets the always-on water filter so the Diode is never left with zero
+-- filters (which would block everything), and makes sure the Diode itself
+-- is turned on in case it was left off. Called once at startup.
+local function initializeDiodeWaterFilter()
+  local address, diode = findBecDiode()
+  if not address then fatalError("could not find bec_diode at startup") end
+  local ok, err = pcall(diode.setCondensateFilterAt, DIODE_WATER_SLOT, DIODE_WATER_FLUID)
+  if not ok then fatalError("could not set Diode water filter: " .. tostring(err)) end
+  log(LEVEL.DEBUG, "Diode water filter set on slot " .. DIODE_WATER_SLOT .. ".")
+
+  local workOk, workErr = pcall(diode.setWorkAllowed, true)
+  if not workOk then fatalError("could not turn on bec_diode: " .. tostring(workErr)) end
+  log(LEVEL.DEBUG, "Diode work allowed.")
+end
+
+-- Opens the Diode for exactly this recipe's Entangled fluids, one per slot.
+local function setDiodeRecipeFilters(recipe)
+  local address, diode = findBecDiode()
+  if not address then fatalError("could not find bec_diode") end
+  for i, slot in ipairs(DIODE_RECIPE_FILTER_SLOTS) do
+    local fluid = recipe.fluids[i]
+    local ok, err = pcall(diode.setCondensateFilterAt, slot, fluid and fluid.entangledName or nil)
+    if not ok then fatalError("setting Diode filter slot " .. slot .. ": " .. tostring(err)) end
+  end
+  log(LEVEL.DEBUG, "Diode filters set for recipe fluids.")
+end
+
+-- Clears the recipe filter slots once a batch is done, leaving only Water.
+local function clearDiodeRecipeFilters()
+  local address, diode = findBecDiode()
+  if not address then fatalError("could not find bec_diode") end
+  for _, slot in ipairs(DIODE_RECIPE_FILTER_SLOTS) do
+    local ok, err = pcall(diode.setCondensateFilterAt, slot, nil)
+    if not ok then fatalError("clearing Diode filter slot " .. slot .. ": " .. tostring(err)) end
+  end
+  log(LEVEL.DEBUG, "Diode recipe filters cleared.")
+end
+
+-- Resumed batches only
+local function setDiodeFiltersFromResumedNodes(assignments)
+  local required = {}
+  for _, a in ipairs(assignments) do
+    local node = component.proxy(a.address)
+    local ok, condensate = pcall(node.getRequiredCondensate)
+    if ok and condensate then
+      for fluidName in pairs(condensate) do
+        required[fluidName] = true
+      end
+    end
+  end
+
+  local names = {}
+  for fluidName in pairs(required) do table.insert(names, fluidName) end
+  if #names > #DIODE_RECIPE_FILTER_SLOTS then
+    fatalError("resumed IONodes require " .. #names .. " Entangled fluids, more than the "
+      .. #DIODE_RECIPE_FILTER_SLOTS .. " the Diode can filter for.")
+  end
+
+  local address, diode = findBecDiode()
+  if not address then fatalError("could not find bec_diode") end
+  for i, slot in ipairs(DIODE_RECIPE_FILTER_SLOTS) do
+    local ok, err = pcall(diode.setCondensateFilterAt, slot, names[i])
+    if not ok then fatalError("setting Diode filter slot " .. slot .. ": " .. tostring(err)) end
+  end
+  log(LEVEL.DEBUG, "Diode filters set from resumed IONodes' required condensate.")
 end
 
 -- ============================================================
@@ -939,6 +1103,11 @@ local function craftAndShip(assignments, recipeName, recipeCopies, batchStartUpt
     os.sleep(NANITE_POLL_INTERVAL)
   end
 
+  if PASSIVE_MODE then
+    setPhase("Clearing Diode filters")
+    clearDiodeRecipeFilters()
+  end
+
   setPhase("Emptying nanite bus")
   local emptyOk, emptyErr = swapper.emptyWithoutRefill()
   if not emptyOk then fatalError("emptying nanite bus subnet: " .. tostring(emptyErr)) end
@@ -961,11 +1130,13 @@ local function craftAndShip(assignments, recipeName, recipeCopies, batchStartUpt
       .. "refusing to return drives to Pending Subnet.")
   end
 
-  local hasCondensate = containmentFieldHasCondensate()
-  if hasCondensate == nil then
-    fatalError("could not verify Containment Field condensate is empty after shipping output")
-  elseif hasCondensate then
-    fatalError("Leftover condensate in Containment Field, refusing to return drives to prevent potential voiding")
+  if not PASSIVE_MODE then
+    local hasCondensate = containmentFieldHasCondensate()
+    if hasCondensate == nil then
+      fatalError("could not verify Containment Field condensate is empty after shipping output")
+    elseif hasCondensate then
+      fatalError("Leftover condensate in Containment Field, refusing to return drives to prevent potential voiding")
+    end
   end
 
   setPhase("Returning input drives")
@@ -1002,6 +1173,10 @@ local function runOneCycle()
   if #resumedAssignments > 0 then
     logSeparator()
     log(LEVEL.WARN, "Resuming " .. #resumedAssignments .. " in-progress IONode(s) from before restart.")
+    if PASSIVE_MODE then
+      setPhase("Setting Diode filters (resumed)")
+      setDiodeFiltersFromResumedNodes(resumedAssignments)
+    end
     craftAndShip(resumedAssignments, nil, nil, computer.uptime())
     return
   end
@@ -1021,15 +1196,33 @@ local function runOneCycle()
     log(LEVEL.DEBUG, "assign " .. a.address .. " -> " .. a.count)
   end
 
-  setPhase("Waiting for Entangler")
-  log(LEVEL.INFO, "Entangling fluids...")
-  local entanglerAddress, entanglerProxy = findGtMachineByName("multi.bec.generator")
-  if not entanglerAddress then fatalError("could not find Entangler (multi.bec.generator)") end
-  local storageAddress, storageProxy = findBecStorage()
-  if not storageAddress then fatalError("could not find bec_storage") end
+  if PASSIVE_MODE then
+    setPhase("Waiting for Condensate")
+    log(LEVEL.INFO, "Waiting for entangled condensate...")
+    for _, fluid in ipairs(recipe.fluids) do
+      log(LEVEL.DEBUG, "  need " .. (fluid.amountPerCopy * recipe.copies) .. "L "
+        .. fluid.entangledName .. " (from " .. fluid.plainName .. ")")
+    end
+    local storageAddress, storageProxy = findBecStorage()
+    if not storageAddress then fatalError("could not find bec_storage") end
 
-  while not checkGate(entanglerProxy, storageProxy) do
-    os.sleep(GATE_POLL_INTERVAL)
+    while not checkCondensateGate(storageProxy, recipe) do
+      os.sleep(GATE_POLL_INTERVAL)
+    end
+
+    setPhase("Setting Diode filters")
+    setDiodeRecipeFilters(recipe)
+  else
+    setPhase("Waiting for Entangler")
+    log(LEVEL.INFO, "Entangling fluids...")
+    local entanglerAddress, entanglerProxy = findGtMachineByName("multi.bec.generator")
+    if not entanglerAddress then fatalError("could not find Entangler (multi.bec.generator)") end
+    local storageAddress, storageProxy = findBecStorage()
+    if not storageAddress then fatalError("could not find bec_storage") end
+
+    while not checkGate(entanglerProxy, storageProxy) do
+      os.sleep(GATE_POLL_INTERVAL)
+    end
   end
 
   setPhase("Starting IONodes")
@@ -1082,7 +1275,7 @@ end
 -- Auto-update
 -- ============================================================
 
-local VERSION = 9
+local VERSION = 10
 local SCRIPT_PATH = "/home/bec_controller.lua"
 local SHRC_PATH = "/home/.shrc"
 local CONFIG_PATH = "/home/config.cfg"
@@ -1309,6 +1502,9 @@ local function startup()
 
   log(LEVEL.DEBUG, "BEC Controller starting.")
 
+  setPhase("Starting Up (Detecting Mode)")
+  detectMode()
+
   setPhase("Starting Up (Disabling IONodes)")
   resetAllIoNodesOff()
 
@@ -1320,6 +1516,11 @@ local function startup()
 
   setPhase("Starting Up (Verifying Output Drive)")
   verifyOutputDriveReady()
+
+  if PASSIVE_MODE then
+    setPhase("Starting Up (Setting Diode Water Filter)")
+    initializeDiodeWaterFilter()
+  end
 
   setPhase("Starting Up (Caching Recipe Patterns)")
   getCachedPatterns(false) -- cache patterns once at startup

@@ -7,6 +7,11 @@ thus the same Nanites. This translates to a 16x speed boost when using 16
 IONodes versus using only one. It also has multiple checks to make voiding
 recipes (hopefully) nearly impossible.
 
+There is also the ability to do both Passive and Non-passive BEC processing.
+Passive BEC processing allows you to passively store condensate in bulk, so
+that you avoid lengthy entanglement times slowing down your recipes. This
+is optional though, but recommended. Detailed towards the end of the guide.
+
 ![Intro](images/01-intro.png)
 
 ## 1. Building the Multiblocks
@@ -281,6 +286,38 @@ You can use Ctrl+Alt+C to exit the script if needed while it's running.
 ![Install](images/31-install.png)
 
 That's it!
+
+## Passive Mode
+
+As stated at the beginning of this guide, it is possible to enable
+"Passive Mode", just by making a few tweaks to the setup. The script
+will automatically determine which mode you are setup for when it is
+started. The following steps will assume you have already complete all
+the previous steps.
+
+![Diode](images/32-Diode.png)
+
+Setup a Maxwell Gate, with the Entangler & Condensate Storage on the
+LEFT side, and the Observation Array on RIGHT side. Putting them on the
+correct side is important. Connect an Adapter to the Maxwell Gate controller.
+
+You need more fluid storage on the input subnet if you are doing Passive mode.
+Add an Insert-Only fluid storage bus, connected to 2 full ME drives with
+Fluid Digital Singularity cells. This should be connected directly to the
+stocking hatch on the Entangler.
+![Fluid Storage](images/33-fluid-storage.png)
+
+Manually add an amount of each fluid that you want to keep in stock. If you
+ever find the machines waiting for things to be entangled, simply add more
+of the fluid that you are low on. You need to keep the fluids in your
+patterns. They will automatically restock any fluids that get used.
+
+Even if you are using Passive Mode, you do not need to put fluids into the
+condensate storage. For example, if you are low on Universium or MHDCSM, you
+can simply not stock any amount of it in the Condensate Storage. This will cause
+you to have to wait for it to entangle on-demand, but it will work properly.
+
+![Condenstae Storage](images/34-condensate-storage.png)
 
 ## Common issues & notes
 
