@@ -85,7 +85,7 @@ On the other side of the Pending Subnet, set it up like shown below. Make
 your controller with 2 Wireless Hubs, and connect that to the Wireless
 Connector shown. Next to that connector should be 2 IO Ports, an ME
 Drive, and normal Interface (This cannot be a dual interface).
-- The two IOPorts should get 3 Accel cards, and set to empty to network,
+- The two IOPorts should get 3 Superluminal Accel cards, and set to empty to network,
   and "Move to output when the cell is empty or the network has been
   emptied."
 - Inside the Interface, add a dummy pattern. This pattern should be for
@@ -122,7 +122,7 @@ all are finished, then they are sent out to the Mainnet.
 Set it up like shown below, with 2 IO Ports, 1 Wireless Hub, 1 ME Drive,
 and 1 Normal Interface (This cannot be a dual interface).
 - Both IO Ports should be set like they are in the screenshot, with the
-  mode as "Move to output when work is done". They should also receive
+  mode as "Move to output when work is done". They should also receive Superluminal
   Accel cards.
 - The IO Port on the left should be connected directly to your mainnet.
   Inside that IO Port, put an item drive to bus the outputs between the
