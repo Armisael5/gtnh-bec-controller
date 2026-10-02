@@ -1,6 +1,6 @@
 -- BEC Controller
 -- Author: Armisael/nex5
--- Version: 10
+-- Version: 11
 -- Automates the Bose-Einstein Condensate network: pulls a recipe from
 -- Input Subnet, splits it among the IONodes, tracks nanite tiers as
 -- they change, ships output back to the main network, resets for the
@@ -493,7 +493,7 @@ end
 local function tryMatch(pattern, stock)
   -- Match a recipe pattern against the current stock of items in the Input Subnet
   local required = {}
-  for _, ingredient in ipairs(pattern.inputs) do
+  for _, ingredient in pairs(pattern.inputs) do
     if not isFluidEntry(ingredient) then
       local key = ingredient.name .. ":" .. tostring(ingredient.damage)
       required[key] = (required[key] or 0) + ingredient.size
@@ -567,7 +567,7 @@ local function tryIdentifyRecipe()
 
   local fluids = {}
   if PASSIVE_MODE then
-    for _, ingredient in ipairs(matched.inputs) do
+    for _, ingredient in pairs(matched.inputs) do
       if isFluidEntry(ingredient) then
         table.insert(fluids, {
           plainName = ingredient.name,
@@ -1275,7 +1275,7 @@ end
 -- Auto-update
 -- ============================================================
 
-local VERSION = 10
+local VERSION = 11
 local SCRIPT_PATH = "/home/bec_controller.lua"
 local SHRC_PATH = "/home/.shrc"
 local CONFIG_PATH = "/home/config.cfg"
