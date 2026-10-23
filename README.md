@@ -56,7 +56,7 @@ On the entangler, Connect the Pending Subnet Wireless Connector to a small subne
 
 ![Conveyors](images/conveyors.png)
 
-Back at the Pending Subnet, place 4 high-tier conveyors on the sides of the hulls facing the IO Ports. Change their settings to match what is pictured. Add a 16384k Item Drive to the top IO Port.
+Back at the Pending Subnet, place 4 high-tier conveyors on the sides of the hulls facing the IO Ports. Change their settings to match what is pictured. Add a 16384k Item Drive to the top IO Port. For gate craft, switch this to an Artificial Universe item cell, as some recipes take more items than it can hold.
 
 ![Redstone IO](images/redstoneio.png)
 
