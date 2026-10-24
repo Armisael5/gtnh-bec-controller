@@ -124,7 +124,7 @@ Set up the above additions to the Nanite Subnet.
 
 In the P2P Interface, we need to place 10 patterns. These will be created with both the input and output as the 10 BEC Nanites. The output should be renamed to the number of the tier, for example Carbon Nanites, the output should be renamed "1". The input should not be renamed.
 
-**Important**: The patterns should be multiplied to be equal to: The number of nanites of that type that you have in the subnet divided by your number of Observation Arrays. So a single Observation Array with max nanites would have a pattern size of 30,720.
+**Important**: The patterns should be multiplied to be equal to: The number of nanites of that type that you have in the subnet divided by your number of Observation Arrays. So a single Observation Array with max nanites would have a pattern size of 30,720. Make sure to update the pattern size when you add more nanites!
 
 ![Slices](images/slices.png)
 
