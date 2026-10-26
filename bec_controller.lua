@@ -283,6 +283,8 @@ end
 
 local function fatalError(message)
   log(LEVEL.ERROR, message)
+  -- Cached data may be what caused the failure, so make the next start rescan.
+  pcall(filesystem.remove, DATA_CACHE_PATH)
   setPhase("FATAL: " .. message)
   sendDiscordMessage(config.errorPingUserID ~= "" and (message .. " <@" .. config.errorPingUserID .. ">") or message)
   while true do os.sleep(5) end
