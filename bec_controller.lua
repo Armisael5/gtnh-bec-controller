@@ -1,6 +1,6 @@
 -- BEC Controller
 -- Author: Armisael/nex5
--- Version: 1
+-- Version: 2
 -- Automates the Bose-Einstein Condensate network: identifies the recipe in the
 -- Input Subnet, splits it across the IONodes, supplies nanite tiers as they
 -- change and resets for the next batch.
@@ -12,7 +12,7 @@ local event = require("event")
 local filesystem = require("filesystem")
 local serialization = require("serialization")
 
-local VERSION = "1"
+local VERSION = "2"
 local SCRIPT_PATH = "/home/bec_controller.lua"
 local SHRC_PATH = "/home/.shrc"
 local CONFIG_PATH = "/home/config.cfg"
